@@ -260,7 +260,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, filial_key, period = data.split(':')
         today = dt.date.today()
         try:
-            text = _report_for(filial_key, period, today)
+            text = await asyncio.to_thread(_report_for, filial_key, period, today)
         except Exception:
             log.exception('report generation failed')
             text = None
@@ -275,7 +275,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start = dt.datetime.strptime(start_s, '%Y%m%d').date()
         end = dt.datetime.strptime(end_s, '%Y%m%d').date()
         try:
-            text = _range_report_for(filial_key, start, end)
+            text = await asyncio.to_thread(_range_report_for, filial_key, start, end)
         except Exception:
             log.exception('range report failed')
             text = None
@@ -292,7 +292,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kassa_date = dt.datetime.strptime(date_s, '%Y%m%d').date()
         filial = FILIALS.get(filial_key)
         try:
-            detail = sheets.get_kassa_day_detail(filial['sheet_id'], kassa_date) if filial and filial['sheet_id'] else None
+            detail = await asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date) if filial and filial['sheet_id'] else None
             text = _format_kassa_detail(filial['title'], detail) if detail else None
         except Exception:
             log.exception('kassa detail failed')
@@ -446,7 +446,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop('awaiting_range_filial', None)
     try:
-        text_out = _range_report_for(filial_key, start, end)
+        text_out = await asyncio.to_thread(_range_report_for, filial_key, start, end)
     except Exception:
         log.exception('range report failed')
         text_out = None
