@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger('garik-bot')
 
 BOT_TOKEN = os.environ['BOT_TOKEN']
+WEBHOOK_SECRET = BOT_TOKEN.replace(':', '')  # ':' в пути ломает роутинг на Render — используем без него
 ALLOWED_USER_IDS = {int(x) for x in os.environ.get('ALLOWED_USER_IDS', '').split(',') if x.strip()}
 PORT = int(os.environ.get('PORT', '10000'))
 EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', '').rstrip('/')
@@ -463,7 +464,7 @@ async def set_commands(app: Application):
 async def on_startup(app: Application):
     await set_commands(app)
     if EXTERNAL_URL:
-        await app.bot.set_webhook(url=f'{EXTERNAL_URL}/webhook/{BOT_TOKEN}')
+        await app.bot.set_webhook(url=f'{EXTERNAL_URL}/webhook/{WEBHOOK_SECRET}')
         log.info('Webhook set to %s/webhook/...', EXTERNAL_URL)
     else:
         log.warning('RENDER_EXTERNAL_URL not set — webhook not configured (local run?)')
@@ -502,7 +503,7 @@ async def main():
         return web.Response()
 
     web_app = web.Application()
-    web_app.router.add_post(f'/webhook/{BOT_TOKEN}', webhook_handler)
+    web_app.router.add_post(f'/webhook/{WEBHOOK_SECRET}', webhook_handler)
     web_app.router.add_get('/health', health)
     web_app.router.add_get('/', health)
 
