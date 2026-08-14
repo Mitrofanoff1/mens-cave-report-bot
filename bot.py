@@ -95,7 +95,12 @@ def _report_footer(filial_key, period, today, start=None, end=None):
             '💰 Что по кассе за этот день?',
             callback_data=f'kassa:{filial_key}:{kassa_date.strftime("%Y%m%d")}:{back}'
         )])
-    buttons.append([InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')])
+        sheet_id = FILIALS[filial_key]['sheet_id']
+        if sheet_id:
+            buttons.append([InlineKeyboardButton(
+                '📊 Перейти в таблицу', url=f'https://docs.google.com/spreadsheets/d/{sheet_id}/edit'
+            )])
+
     other = _other_filial(filial_key)
     if other:
         if period == 'range' and start and end:
@@ -103,6 +108,8 @@ def _report_footer(filial_key, period, today, start=None, end=None):
         else:
             cb = f'report:{other}:{period}'
         buttons.append([InlineKeyboardButton(f"🔀 Другой филиал ({FILIALS[other]['title']})", callback_data=cb)])
+
+    buttons.append([InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')])
     return InlineKeyboardMarkup(buttons)
 
 
