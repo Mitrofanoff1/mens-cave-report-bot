@@ -503,10 +503,23 @@ async def main():
     await application.start()
     await on_startup(application)
 
+    async def process_update_safely(update):
+        try:
+            await application.process_update(update)
+        except Exception:
+            # Одно упавшее обновление (например Flood control от Telegram при
+            # повторной доставке) не должно ронять весь процесс на Render.
+            log.exception('update processing failed')
+
     async def webhook_handler(request):
         data = await request.json()
         update = Update.de_json(data, application.bot)
-        await application.process_update(update)
+        # Отвечаем Telegram сразу, а обрабатываем в фоне — иначе долгий отчёт
+        # (неделя/месяц/оба филиала, несколько запросов к таблицам подряд)
+        # не укладывается в таймаут вебхука, и Telegram шлёт то же обновление
+        # повторно — получаются дублирующиеся правки одного сообщения и
+        # ошибка "Flood control exceeded".
+        asyncio.create_task(process_update_safely(update))
         return web.Response()
 
     web_app = web.Application()
