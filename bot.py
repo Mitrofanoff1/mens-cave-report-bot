@@ -100,6 +100,9 @@ def _report_footer(filial_key, period, today, start=None, end=None):
             buttons.append([InlineKeyboardButton(
                 '📊 Перейти в таблицу', url=f'https://docs.google.com/spreadsheets/d/{sheet_id}/edit'
             )])
+        buttons.append([InlineKeyboardButton(
+            '📈 Статистика за месяц', callback_data=f'report:{filial_key}:month'
+        )])
 
     other = _other_filial(filial_key)
     if other:
@@ -260,6 +263,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, filial_key, period = data.split(':')
         today = dt.date.today()
         try:
+            await query.edit_message_text('⏳ Секунду, собираю данные…')
+        except Exception:
+            pass
+        try:
             text = await asyncio.to_thread(_report_for, filial_key, period, today)
         except Exception:
             log.exception('report generation failed')
@@ -274,6 +281,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, filial_key, start_s, end_s = data.split(':')
         start = dt.datetime.strptime(start_s, '%Y%m%d').date()
         end = dt.datetime.strptime(end_s, '%Y%m%d').date()
+        try:
+            await query.edit_message_text('⏳ Секунду, собираю данные…')
+        except Exception:
+            pass
         try:
             text = await asyncio.to_thread(_range_report_for, filial_key, start, end)
         except Exception:
@@ -291,6 +302,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_period = parts[3] if len(parts) > 3 else 'today'
         kassa_date = dt.datetime.strptime(date_s, '%Y%m%d').date()
         filial = FILIALS.get(filial_key)
+        try:
+            await query.edit_message_text('⏳ Секунду, собираю данные…')
+        except Exception:
+            pass
         try:
             detail = await asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date) if filial and filial['sheet_id'] else None
             text = _format_kassa_detail(filial['title'], detail) if detail else None
@@ -445,6 +460,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data.pop('awaiting_range_filial', None)
+    loading_msg = await update.message.reply_text('⏳ Секунду, собираю данные…')
     try:
         text_out = await asyncio.to_thread(_range_report_for, filial_key, start, end)
     except Exception:
@@ -452,7 +468,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_out = None
     if text_out is None:
         text_out = 'Не нашёл данные за этот период.'
-    await update.message.reply_text(
+    await loading_msg.edit_text(
         text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
     )
 
