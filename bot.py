@@ -217,6 +217,27 @@ def _format_kassa_detail(filial_title, data):
     return '\n'.join(lines)
 
 
+REPORT_TIMEOUT = 30  # секунд — не ждём Google Sheets дольше этого, иначе "Секунду..." висело бы вечно
+
+
+async def _show_loading(query):
+    try:
+        await query.edit_message_text('⏳ Секунду, собираю данные…')
+    except Exception:
+        pass  # не критично, если не удалось — итоговый текст всё равно попробуем показать
+
+
+async def _finish_report(query, text, reply_markup):
+    try:
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    except Exception:
+        log.exception('failed to edit final report message, sending as a new message instead')
+        try:
+            await query.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        except Exception:
+            log.exception('fallback send also failed')
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     context.user_data.pop('awaiting_range_filial', None)
@@ -262,38 +283,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith('report:'):
         _, filial_key, period = data.split(':')
         today = dt.date.today()
+        await _show_loading(query)
         try:
-            await query.edit_message_text('⏳ Секунду, собираю данные…')
-        except Exception:
-            pass
-        try:
-            text = await asyncio.to_thread(_report_for, filial_key, period, today)
+            text = await asyncio.wait_for(asyncio.to_thread(_report_for, filial_key, period, today), REPORT_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.error('report generation timed out')
+            text = None
         except Exception:
             log.exception('report generation failed')
             text = None
 
         if text is None:
-            text = 'Не нашёл данные за этот период (возможно, лист ещё не создан или день пуст).'
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=_report_footer(filial_key, period, today))
+            text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+        await _finish_report(query, text, _report_footer(filial_key, period, today))
         return
 
     if data.startswith('rrange:'):
         _, filial_key, start_s, end_s = data.split(':')
         start = dt.datetime.strptime(start_s, '%Y%m%d').date()
         end = dt.datetime.strptime(end_s, '%Y%m%d').date()
+        await _show_loading(query)
         try:
-            await query.edit_message_text('⏳ Секунду, собираю данные…')
-        except Exception:
-            pass
-        try:
-            text = await asyncio.to_thread(_range_report_for, filial_key, start, end)
+            text = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.error('range report generation timed out')
+            text = None
         except Exception:
             log.exception('range report failed')
             text = None
         if text is None:
-            text = 'Не нашёл данные за этот период.'
+            text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
         today = dt.date.today()
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', today, start, end))
+        await _finish_report(query, text, _report_footer(filial_key, 'range', today, start, end))
         return
 
     if data.startswith('kassa:'):
@@ -302,18 +323,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_period = parts[3] if len(parts) > 3 else 'today'
         kassa_date = dt.datetime.strptime(date_s, '%Y%m%d').date()
         filial = FILIALS.get(filial_key)
+        await _show_loading(query)
         try:
-            await query.edit_message_text('⏳ Секунду, собираю данные…')
-        except Exception:
-            pass
-        try:
-            detail = await asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date) if filial and filial['sheet_id'] else None
+            if filial and filial['sheet_id']:
+                detail = await asyncio.wait_for(
+                    asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date), REPORT_TIMEOUT
+                )
+            else:
+                detail = None
             text = _format_kassa_detail(filial['title'], detail) if detail else None
+        except asyncio.TimeoutError:
+            log.error('kassa detail timed out')
+            text = None
         except Exception:
             log.exception('kassa detail failed')
             text = None
         if text is None:
-            text = f"Не нашёл данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день ещё не заполнен)."
+            text = f"Не нашёл данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день ещё не заполнен, либо таблица долго не отвечает)."
 
         if back_period == 'range' and len(parts) > 5:
             back_cb = f'rrange:{filial_key}:{parts[4]}:{parts[5]}'
@@ -323,7 +349,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('← Назад к отчёту', callback_data=back_cb)],
             [InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')],
         ])
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=back)
+        await _finish_report(query, text, back)
         return
 
 
@@ -462,15 +488,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('awaiting_range_filial', None)
     loading_msg = await update.message.reply_text('⏳ Секунду, собираю данные…')
     try:
-        text_out = await asyncio.to_thread(_range_report_for, filial_key, start, end)
+        text_out = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.error('range report generation timed out')
+        text_out = None
     except Exception:
         log.exception('range report failed')
         text_out = None
     if text_out is None:
-        text_out = 'Не нашёл данные за этот период.'
-    await loading_msg.edit_text(
-        text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
-    )
+        text_out = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+    try:
+        await loading_msg.edit_text(
+            text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
+        )
+    except Exception:
+        log.exception('failed to edit final range report message, sending as a new message instead')
+        await update.message.reply_text(
+            text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
+        )
 
 
 async def health(request):

@@ -15,9 +15,13 @@ KASSA sheet ("КАССА <Месяц> <Год>"): day rows starting at row6, col
 """
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import google_auth_httplib2
+import httplib2
 import os
 import json
 import datetime as dt
+
+HTTP_TIMEOUT_SECONDS = 20  # без этого зависший TCP-запрос к Google мог висеть неограниченно долго
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
@@ -52,7 +56,8 @@ def get_service():
     else:
         creds_file = os.environ['GOOGLE_CREDENTIALS_FILE']
         creds = service_account.Credentials.from_service_account_file(creds_file, scopes=SCOPES)
-    _service = build('sheets', 'v4', credentials=creds)
+    authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=HTTP_TIMEOUT_SECONDS))
+    _service = build('sheets', 'v4', http=authed_http, cache_discovery=False)
     return _service
 
 
