@@ -217,7 +217,7 @@ def _format_kassa_detail(filial_title, data):
     return '\n'.join(lines)
 
 
-REPORT_TIMEOUT = 30  # секунд — не ждём Google Sheets дольше этого, иначе "Секунду..." висело бы вечно
+REPORT_TIMEOUT = 45  # секунд — с запасом на автоповтор внутри sheets.py при временных сбоях
 
 
 async def _show_loading(query):

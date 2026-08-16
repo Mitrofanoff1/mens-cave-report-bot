@@ -19,9 +19,10 @@ import google_auth_httplib2
 import httplib2
 import os
 import json
+import time
 import datetime as dt
 
-HTTP_TIMEOUT_SECONDS = 20  # без этого зависший TCP-запрос к Google мог висеть неограниченно долго
+HTTP_TIMEOUT_SECONDS = 8  # держим короче, чтобы даже с повтором укладываться в общий бюджет времени на отчёт
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
@@ -73,12 +74,20 @@ def _col_letter(n):
     return s
 
 
-def _fetch_grid(spreadsheet_id, sheet_name, a1_range):
+def _fetch_grid(spreadsheet_id, sheet_name, a1_range, _retries=1):
     service = get_service()
-    resp = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!{a1_range}"
-    ).execute()
-    return resp.get('values', [])
+    last_err = None
+    for attempt in range(_retries + 1):
+        try:
+            resp = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!{a1_range}"
+            ).execute()
+            return resp.get('values', [])
+        except Exception as e:
+            last_err = e
+            if attempt < _retries:
+                time.sleep(1)  # короткая пауза — почти все временные сбои Google/сети проходят сами
+    raise last_err
 
 
 def _num(v):
