@@ -112,6 +112,16 @@ def _report_footer(filial_key, period, today, start=None, end=None):
         buttons.append([InlineKeyboardButton(
             '📈 Статистика за месяц', callback_data=f'report:{filial_key}:month'
         )])
+    else:
+        # общий отчёт за 2 филиала: быстрые кнопки недели/месяца
+        # (кнопку текущего периода не дублируем)
+        stats = []
+        if period != 'week':
+            stats.append(InlineKeyboardButton('📊 Статистика за неделю', callback_data='report:both:week'))
+        if period != 'month':
+            stats.append(InlineKeyboardButton('📈 Статистика за месяц', callback_data='report:both:month'))
+        if stats:
+            buttons.append(stats)
 
     other = _other_filial(filial_key)
     if other:
