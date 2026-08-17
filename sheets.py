@@ -12,6 +12,10 @@ Assumes the same template layout used across filials:
   a totals column (I, Q, Y, AG, AO, AW) with a week SUM already computed, and row1 of
   each block holds a merged "dd.mm - dd.mm" label. AZ5..AZ20 holds the whole-month totals.
 KASSA sheet ("КАССА <Месяц> <Год>"): day rows starting at row6, columns H(date)..O(status).
+
+Весь месячный лист читается ОДНИМ запросом (A1:AZ25) — из этой сетки достаём
+день/неделю/месяц/период. Так отчёт укладывается в 1-2 запроса к API вместо
+десятков и не упирается в квоту Google (60 чтений в минуту).
 """
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -44,6 +48,9 @@ SUMMARY_ROWS = [ROW_CLIENTS_TOTAL, ROW_CLIENTS_REPEAT, ROW_CLIENTS_NEW,
                 ROW_GOODS_COUNT, ROW_GOODS_TOTAL, ROW_GOODS_CASH,
                 ROW_REVIEWS_2GIS, ROW_REVIEWS_YANDEX]
 
+GRID_RANGE = 'A1:AZ25'   # весь месячный лист одним чтением
+MONTH_TOTAL_COL = 52     # столбец AZ — готовые итоги за месяц
+
 # httplib2.Http не потокобезопасен: два одновременных запроса через один объект
 # ломают друг другу соединение (зависания, битые ответы). Отчёты запускаются в
 # отдельных потоках (asyncio.to_thread), поэтому держим свой service на каждый поток.
@@ -71,14 +78,6 @@ def _sheet_name_for(date):
     return f'{MONTHS_RU[date.month - 1]} {date.year}'
 
 
-def _col_letter(n):
-    s = ''
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
 def _fetch_grid(spreadsheet_id, sheet_name, a1_range, _retries=1):
     service = get_service()
     last_err = None
@@ -95,6 +94,30 @@ def _fetch_grid(spreadsheet_id, sheet_name, a1_range, _retries=1):
     raise last_err
 
 
+def _month_grid(spreadsheet_id, sheet_name):
+    return _fetch_grid(spreadsheet_id, sheet_name, GRID_RANGE)
+
+
+def _cell(grid, row, col):
+    """Значение ячейки из сетки (1-based row/col); '' если за пределами данных."""
+    r = grid[row - 1] if len(grid) >= row else []
+    return r[col - 1] if len(r) >= col else ''
+
+
+def _col_vals(grid, col, rows):
+    return {r: _cell(grid, r, col) for r in rows}
+
+
+def _grid_day_col(grid, date):
+    """1-based номер столбца, где в строке 4 стоит нужная дата, или None."""
+    target = date.strftime('%d.%m.%Y')
+    dates_row = grid[3] if len(grid) > 3 else []
+    for i, v in enumerate(dates_row):
+        if v == target:
+            return i + 1
+    return None
+
+
 def _num(v):
     if v in (None, ''):
         return 0
@@ -107,65 +130,11 @@ def _num(v):
         return 0
 
 
-def find_day_column(spreadsheet_id, sheet_name, date):
-    """Returns the 1-indexed column number whose row4 matches `date`, or None."""
-    target = date.strftime('%d.%m.%Y')
-    rows = _fetch_grid(spreadsheet_id, sheet_name, 'A4:AW4')
-    if not rows:
-        return None
-    row = rows[0]
-    for i, v in enumerate(row):
-        if v == target:
-            return i + 1
-    return None
-
-
 def _week_block_bounds(day_col):
     for start, end in DAY_BLOCK_BOUNDS:
         if start <= day_col <= end:
             return start, end
     return None
-
-
-def find_week_total_column(spreadsheet_id, sheet_name, date):
-    """Returns the 1-indexed total column for the week block containing `date`."""
-    day_col = find_day_column(spreadsheet_id, sheet_name, date)
-    if day_col is None:
-        return None
-    bounds = _week_block_bounds(day_col)
-    if not bounds:
-        return None
-    start, _ = bounds
-    return start + 7  # 7 day-columns then the total column
-
-
-def get_week_label(spreadsheet_id, sheet_name, date):
-    """Reads the merged 'dd.mm - dd.mm' header text for the week block containing `date`."""
-    day_col = find_day_column(spreadsheet_id, sheet_name, date)
-    if day_col is None:
-        return ''
-    bounds = _week_block_bounds(day_col)
-    if not bounds:
-        return ''
-    start, _ = bounds
-    letter = _col_letter(start)
-    vals = _fetch_grid(spreadsheet_id, sheet_name, f'{letter}1')
-    return vals[0][0] if vals and vals[0] else ''
-
-
-def _read_column_by_letter(spreadsheet_id, sheet_name, letter, rows):
-    a1 = f'{letter}{min(rows)}:{letter}{max(rows)}'
-    values = _fetch_grid(spreadsheet_id, sheet_name, a1)
-    out = {}
-    row_start = min(rows)
-    for r in rows:
-        idx = r - row_start
-        out[r] = values[idx][0] if idx < len(values) and values[idx] else ''
-    return out
-
-
-def _read_column(spreadsheet_id, sheet_name, col, rows):
-    return _read_column_by_letter(spreadsheet_id, sheet_name, _col_letter(col), rows)
 
 
 def _summary_dict(vals, extra=None):
@@ -190,72 +159,77 @@ def _summary_dict(vals, extra=None):
 
 def get_day_report(spreadsheet_id, date):
     sheet_name = _sheet_name_for(date)
-    col = find_day_column(spreadsheet_id, sheet_name, date)
+    grid = _month_grid(spreadsheet_id, sheet_name)
+    col = _grid_day_col(grid, date)
     if col is None:
         return None
     rows_needed = SUMMARY_ROWS + [ROW_KASSA_START, ROW_KASSA_END, ROW_DISCREPANCY, ROW_ADMIN]
-    vals = _read_column(spreadsheet_id, sheet_name, col, rows_needed)
-    kassa_status = get_kassa_status(spreadsheet_id, sheet_name, date)
+    vals = _col_vals(grid, col, rows_needed)
     return _summary_dict(vals, {
         'date': date, 'sheet_name': sheet_name, 'period': 'day',
         'kassa_start': _num(vals[ROW_KASSA_START]),
         'kassa_end': _num(vals[ROW_KASSA_END]),
         'discrepancy': _num(vals[ROW_DISCREPANCY]),
         'admin': vals[ROW_ADMIN] or '—',
-        'kassa_status': kassa_status,
     })
 
 
 def get_week_report(spreadsheet_id, date):
     sheet_name = _sheet_name_for(date)
-    col = find_week_total_column(spreadsheet_id, sheet_name, date)
-    if col is None:
+    grid = _month_grid(spreadsheet_id, sheet_name)
+    day_col = _grid_day_col(grid, date)
+    if day_col is None:
         return None
-    vals = _read_column(spreadsheet_id, sheet_name, col, SUMMARY_ROWS)
-    label = get_week_label(spreadsheet_id, sheet_name, date)
+    bounds = _week_block_bounds(day_col)
+    if not bounds:
+        return None
+    start, _ = bounds
+    vals = _col_vals(grid, start + 7, SUMMARY_ROWS)  # 7 дневных столбцов, затем итог недели
+    label = _cell(grid, 1, start)  # объединённая шапка блока "dd.mm - dd.mm"
     return _summary_dict(vals, {'date': date, 'sheet_name': sheet_name, 'period': 'week', 'label': label})
 
 
 def get_month_report(spreadsheet_id, date):
     sheet_name = _sheet_name_for(date)
-    vals = _read_column_by_letter(spreadsheet_id, sheet_name, 'AZ', SUMMARY_ROWS)
+    grid = _month_grid(spreadsheet_id, sheet_name)
+    vals = _col_vals(grid, MONTH_TOTAL_COL, SUMMARY_ROWS)
     return _summary_dict(vals, {'date': date, 'sheet_name': sheet_name, 'period': 'month'})
 
 
 def get_range_report(spreadsheet_id, start_date, end_date):
-    """Sums day-by-day across an arbitrary (possibly cross-month) range."""
+    """Sums day-by-day across an arbitrary (possibly cross-month) range.
+    Один запрос к API на каждый задетый месяц, а не на каждый день."""
     totals = {k: 0 for k in [
         'clients_total', 'clients_repeat', 'clients_new',
         'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
         'goods_count', 'goods_total', 'goods_cash', 'reviews_2gis', 'reviews_yandex']}
+    row_by_key = {
+        'clients_total': ROW_CLIENTS_TOTAL, 'clients_repeat': ROW_CLIENTS_REPEAT, 'clients_new': ROW_CLIENTS_NEW,
+        'revenue_total': ROW_REVENUE_TOTAL, 'revenue_terminal': ROW_TERMINAL,
+        'revenue_cash': ROW_CASH, 'revenue_transfer': ROW_TRANSFER,
+        'goods_count': ROW_GOODS_COUNT, 'goods_total': ROW_GOODS_TOTAL, 'goods_cash': ROW_GOODS_CASH,
+        'reviews_2gis': ROW_REVIEWS_2GIS, 'reviews_yandex': ROW_REVIEWS_YANDEX}
+    wanted = {(start_date + dt.timedelta(days=i)).strftime('%d.%m.%Y')
+              for i in range((end_date - start_date).days + 1)}
     found_any = False
-    d = start_date
-    while d <= end_date:
-        day = get_day_report(spreadsheet_id, d)
-        if day:
-            found_any = True
-            for k in totals:
-                totals[k] += day.get(k, 0)
-        d += dt.timedelta(days=1)
+    month = dt.date(start_date.year, start_date.month, 1)
+    while month <= end_date:
+        try:
+            grid = _month_grid(spreadsheet_id, _sheet_name_for(month))
+        except Exception:
+            grid = []  # листа за этот месяц нет — просто пропускаем
+        dates_row = grid[3] if len(grid) > 3 else []
+        for i, v in enumerate(dates_row):
+            if v in wanted:
+                found_any = True
+                col = i + 1
+                for k, row in row_by_key.items():
+                    totals[k] += _num(_cell(grid, row, col))
+        month = (month + dt.timedelta(days=32)).replace(day=1)
     if not found_any:
         return None
     totals.update({'date': start_date, 'date_end': end_date, 'period': 'range'})
     return totals
-
-
-def get_kassa_status(spreadsheet_id, report_sheet_name, date):
-    """Reads the precomputed Статус cell from 'КАССА <Месяц> <Год>' for this date."""
-    kassa_sheet = f'КАССА {report_sheet_name}'
-    target = date.strftime('%d.%m.%Y')
-    try:
-        rows = _fetch_grid(spreadsheet_id, kassa_sheet, 'H6:H36')
-    except Exception:
-        return None
-    for i, row in enumerate(rows):
-        if row and row[0] == target:
-            status_rows = _fetch_grid(spreadsheet_id, kassa_sheet, f'O{6+i}')
-            return status_rows[0][0] if status_rows and status_rows[0] else None
-    return None
 
 
 def get_kassa_day_detail(spreadsheet_id, date):
@@ -266,17 +240,14 @@ def get_kassa_day_detail(spreadsheet_id, date):
     target = date.strftime('%d.%m.%Y')
 
     try:
-        date_rows = _fetch_grid(spreadsheet_id, kassa_sheet, 'H6:H36')
+        rows = _fetch_grid(spreadsheet_id, kassa_sheet, 'H6:O36')
     except Exception:
         return None
 
     summary = None
-    for i, row in enumerate(date_rows):
+    for row in rows:
         if row and row[0] == target:
-            r = 6 + i
-            vals = _fetch_grid(spreadsheet_id, kassa_sheet, f'H{r}:O{r}')
-            v = vals[0] if vals else []
-            v = v + [''] * (8 - len(v))
+            v = row + [''] * (8 - len(row))
             summary = {
                 'start': _num(v[1]), 'revenue_cash': _num(v[2]),
                 'other_income': _num(v[3]), 'expenses': _num(v[4]),

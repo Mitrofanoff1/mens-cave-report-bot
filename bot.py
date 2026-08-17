@@ -54,6 +54,14 @@ BUTTON_TO_FILIAL_KEY = {BTN_MURINO: 'murino', BTN_BUGRY: 'bugry', BTN_BOTH: 'bot
 
 DAY_OFFSETS = {'today': 0, 'yesterday': 1, 'before_yesterday': 2}
 
+# Render живёт по UTC: без явного пояса с 00:00 до 03:00 по Москве
+# «сегодня» считалось бы вчерашним днём и отчёты ехали на день назад.
+MSK = dt.timezone(dt.timedelta(hours=3))
+
+
+def _today():
+    return dt.datetime.now(MSK).date()
+
 COMBINED_TITLE = 'Мурино + Бугры'
 SUM_KEYS = ['clients_total', 'clients_repeat', 'clients_new',
             'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
@@ -228,6 +236,15 @@ async def _show_loading(query):
         pass  # не критично, если не удалось — итоговый текст всё равно попробуем показать
 
 
+async def _edit_quiet(query, *args, **kwargs):
+    """Правка сообщения, где сбой не критичен (повторное нажатие той же кнопки
+    даёт от Telegram "message is not modified" — это не ошибка)."""
+    try:
+        await query.edit_message_text(*args, **kwargs)
+    except Exception:
+        log.warning('edit_message_text failed (скорее всего, текст не изменился)')
+
+
 async def _finish_report(query, text, reply_markup):
     try:
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
@@ -275,21 +292,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
     if data == 'menu':
-        await query.edit_message_text('Выберите филиал кнопкой внизу 👇')
+        await _edit_quiet(query, 'Выберите филиал кнопкой внизу 👇')
         return
 
     if data.startswith('filial:'):
         filial_key = data.split(':')[1]
         context.user_data.pop('awaiting_range_filial', None)
         title = COMBINED_TITLE if filial_key == 'both' else FILIALS[filial_key]['title']
-        await query.edit_message_text(f'{title} — выберите период:', reply_markup=_period_menu(filial_key))
+        await _edit_quiet(query, f'{title} — выберите период:', reply_markup=_period_menu(filial_key))
         return
 
     if data.startswith('range:'):
         filial_key = data.split(':')[1]
         context.user_data['awaiting_range_filial'] = filial_key
         cancel_menu = InlineKeyboardMarkup([[InlineKeyboardButton('« Отмена', callback_data=f'filial:{filial_key}')]])
-        await query.edit_message_text(
+        await _edit_quiet(
+            query,
             'Введите период одним сообщением в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ\n'
             'Например: 01.08.2026-10.08.2026',
             reply_markup=cancel_menu
@@ -302,7 +320,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['report_busy'] = True
         try:
             _, filial_key, period = data.split(':')
-            today = dt.date.today()
+            today = _today()
             await _show_loading(query)
             try:
                 text = await asyncio.wait_for(asyncio.to_thread(_report_for, filial_key, period, today), REPORT_TIMEOUT)
@@ -339,45 +357,51 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = None
             if text is None:
                 text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
-            today = dt.date.today()
+            today = _today()
             await _finish_report(query, text, _report_footer(filial_key, 'range', today, start, end))
         finally:
             context.user_data.pop('report_busy', None)
         return
 
     if data.startswith('kassa:'):
-        parts = data.split(':')
-        filial_key, date_s = parts[1], parts[2]
-        back_period = parts[3] if len(parts) > 3 else 'today'
-        kassa_date = dt.datetime.strptime(date_s, '%Y%m%d').date()
-        filial = FILIALS.get(filial_key)
-        await _show_loading(query)
+        if context.user_data.get('report_busy'):
+            return  # двойной тап — предыдущий отчёт ещё собирается, не дублируем
+        context.user_data['report_busy'] = True
         try:
-            if filial and filial['sheet_id']:
-                detail = await asyncio.wait_for(
-                    asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date), REPORT_TIMEOUT
-                )
-            else:
-                detail = None
-            text = _format_kassa_detail(filial['title'], detail) if detail else None
-        except asyncio.TimeoutError:
-            log.error('kassa detail timed out')
-            text = None
-        except Exception:
-            log.exception('kassa detail failed')
-            text = None
-        if text is None:
-            text = f"Не нашёл данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день ещё не заполнен, либо таблица долго не отвечает)."
+            parts = data.split(':')
+            filial_key, date_s = parts[1], parts[2]
+            back_period = parts[3] if len(parts) > 3 else 'today'
+            kassa_date = dt.datetime.strptime(date_s, '%Y%m%d').date()
+            filial = FILIALS.get(filial_key)
+            await _show_loading(query)
+            try:
+                if filial and filial['sheet_id']:
+                    detail = await asyncio.wait_for(
+                        asyncio.to_thread(sheets.get_kassa_day_detail, filial['sheet_id'], kassa_date), REPORT_TIMEOUT
+                    )
+                else:
+                    detail = None
+                text = _format_kassa_detail(filial['title'], detail) if detail else None
+            except asyncio.TimeoutError:
+                log.error('kassa detail timed out')
+                text = None
+            except Exception:
+                log.exception('kassa detail failed')
+                text = None
+            if text is None:
+                text = f"Не нашёл данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день ещё не заполнен, либо таблица долго не отвечает)."
 
-        if back_period == 'range' and len(parts) > 5:
-            back_cb = f'rrange:{filial_key}:{parts[4]}:{parts[5]}'
-        else:
-            back_cb = f'report:{filial_key}:{back_period}'
-        back = InlineKeyboardMarkup([
-            [InlineKeyboardButton('← Назад к отчёту', callback_data=back_cb)],
-            [InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')],
-        ])
-        await _finish_report(query, text, back)
+            if back_period == 'range' and len(parts) > 5:
+                back_cb = f'rrange:{filial_key}:{parts[4]}:{parts[5]}'
+            else:
+                back_cb = f'report:{filial_key}:{back_period}'
+            back = InlineKeyboardMarkup([
+                [InlineKeyboardButton('← Назад к отчёту', callback_data=back_cb)],
+                [InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')],
+            ])
+            await _finish_report(query, text, back)
+        finally:
+            context.user_data.pop('report_busy', None)
         return
 
 
@@ -388,6 +412,16 @@ def _today_kassa_end(sheet_id, today):
         d = sheets.get_day_report(sheet_id, today)
         return d['kassa_end'] if d else None
     except Exception:
+        return None
+
+
+def _safe(fn, *args):
+    """Для общего отчёта за 2 филиала: сбой одной таблицы не должен ронять весь
+    отчёт — показываем данные хотя бы по второй."""
+    try:
+        return fn(*args)
+    except Exception:
+        log.exception('sheets call failed: %s', getattr(fn, '__name__', fn))
         return None
 
 
@@ -402,15 +436,15 @@ def _combined_report(period, today):
     if period in DAY_OFFSETS:
         d = today - dt.timedelta(days=DAY_OFFSETS[period])
         merged = _merge_reports(
-            sheets.get_day_report(m_id, d) if m_id else None,
-            sheets.get_day_report(b_id, d) if b_id else None)
+            _safe(sheets.get_day_report, m_id, d) if m_id else None,
+            _safe(sheets.get_day_report, b_id, d) if b_id else None)
         if merged is None:
             return None
         merged['date'] = d
         return _format_day(COMBINED_TITLE, merged, include_kassa=False)
     if period == 'week':
-        a = sheets.get_week_report(m_id, today) if m_id else None
-        b = sheets.get_week_report(b_id, today) if b_id else None
+        a = _safe(sheets.get_week_report, m_id, today) if m_id else None
+        b = _safe(sheets.get_week_report, b_id, today) if b_id else None
         merged = _merge_reports(a, b)
         if merged is None:
             return None
@@ -418,8 +452,8 @@ def _combined_report(period, today):
         merged['kassa_now'] = _sum_optional(_today_kassa_end(m_id, today), _today_kassa_end(b_id, today))
         return _format_week(COMBINED_TITLE, merged)
     if period == 'month':
-        a = sheets.get_month_report(m_id, today) if m_id else None
-        b = sheets.get_month_report(b_id, today) if b_id else None
+        a = _safe(sheets.get_month_report, m_id, today) if m_id else None
+        b = _safe(sheets.get_month_report, b_id, today) if b_id else None
         merged = _merge_reports(a, b)
         if merged is None:
             return None
@@ -458,11 +492,11 @@ def _report_for(filial_key, period, today):
 
 
 def _range_report_for(filial_key, start, end):
-    today = dt.date.today()
+    today = _today()
     if filial_key == 'both':
         m_id, b_id = FILIALS['murino']['sheet_id'], FILIALS['bugry']['sheet_id']
-        a = sheets.get_range_report(m_id, start, end) if m_id else None
-        b = sheets.get_range_report(b_id, start, end) if b_id else None
+        a = _safe(sheets.get_range_report, m_id, start, end) if m_id else None
+        b = _safe(sheets.get_range_report, b_id, start, end) if b_id else None
         merged = _merge_reports(a, b)
         if merged is None:
             return None
@@ -513,27 +547,34 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Слишком большой период (максимум ~3 месяца). Введите период короче.')
         return
 
+    if context.user_data.get('report_busy'):
+        await update.message.reply_text('⏳ Уже собираю предыдущий отчёт — подождите чуть-чуть…')
+        return
     context.user_data.pop('awaiting_range_filial', None)
-    loading_msg = await update.message.reply_text('⏳ Секунду, собираю данные…')
+    context.user_data['report_busy'] = True
     try:
-        text_out = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
-    except asyncio.TimeoutError:
-        log.error('range report generation timed out')
-        text_out = None
-    except Exception:
-        log.exception('range report failed')
-        text_out = None
-    if text_out is None:
-        text_out = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
-    try:
-        await loading_msg.edit_text(
-            text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
-        )
-    except Exception:
-        log.exception('failed to edit final range report message, sending as a new message instead')
-        await update.message.reply_text(
-            text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', dt.date.today(), start, end)
-        )
+        loading_msg = await update.message.reply_text('⏳ Секунду, собираю данные…')
+        try:
+            text_out = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.error('range report generation timed out')
+            text_out = None
+        except Exception:
+            log.exception('range report failed')
+            text_out = None
+        if text_out is None:
+            text_out = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+        try:
+            await loading_msg.edit_text(
+                text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', _today(), start, end)
+            )
+        except Exception:
+            log.exception('failed to edit final range report message, sending as a new message instead')
+            await update.message.reply_text(
+                text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', _today(), start, end)
+            )
+    finally:
+        context.user_data.pop('report_busy', None)
 
 
 async def health(request):
@@ -591,8 +632,12 @@ async def main():
             log.exception('update processing failed')
 
     async def webhook_handler(request):
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+        except Exception:
+            log.exception('bad webhook payload — ignoring')
+            return web.Response()
         # Отвечаем Telegram сразу, а обрабатываем в фоне — иначе долгий отчёт
         # (неделя/месяц/оба филиала, несколько запросов к таблицам подряд)
         # не укладывается в таймаут вебхука, и Telegram шлёт то же обновление
