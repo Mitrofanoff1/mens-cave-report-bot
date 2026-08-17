@@ -20,6 +20,7 @@ import httplib2
 import os
 import json
 import time
+import threading
 import datetime as dt
 
 HTTP_TIMEOUT_SECONDS = 8  # держим короче, чтобы даже с повтором укладываться в общий бюджет времени на отчёт
@@ -43,13 +44,16 @@ SUMMARY_ROWS = [ROW_CLIENTS_TOTAL, ROW_CLIENTS_REPEAT, ROW_CLIENTS_NEW,
                 ROW_GOODS_COUNT, ROW_GOODS_TOTAL, ROW_GOODS_CASH,
                 ROW_REVIEWS_2GIS, ROW_REVIEWS_YANDEX]
 
-_service = None
+# httplib2.Http не потокобезопасен: два одновременных запроса через один объект
+# ломают друг другу соединение (зависания, битые ответы). Отчёты запускаются в
+# отдельных потоках (asyncio.to_thread), поэтому держим свой service на каждый поток.
+_local = threading.local()
 
 
 def get_service():
-    global _service
-    if _service:
-        return _service
+    service = getattr(_local, 'service', None)
+    if service:
+        return service
     creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if creds_json:
         info = json.loads(creds_json)
@@ -58,8 +62,9 @@ def get_service():
         creds_file = os.environ['GOOGLE_CREDENTIALS_FILE']
         creds = service_account.Credentials.from_service_account_file(creds_file, scopes=SCOPES)
     authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=HTTP_TIMEOUT_SECONDS))
-    _service = build('sheets', 'v4', http=authed_http, cache_discovery=False)
-    return _service
+    service = build('sheets', 'v4', http=authed_http, cache_discovery=False)
+    _local.service = service
+    return service
 
 
 def _sheet_name_for(date):

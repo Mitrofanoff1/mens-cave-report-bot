@@ -13,6 +13,7 @@ import logging
 import datetime as dt
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 import sheets
@@ -230,12 +231,22 @@ async def _show_loading(query):
 async def _finish_report(query, text, reply_markup):
     try:
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        return
+    except RetryAfter as e:
+        # Flood control: Telegram просит подождать. Ждём и повторяем, иначе отчёт молча пропадёт.
+        log.warning('flood control on edit, retrying in %s s', e.retry_after)
+        await asyncio.sleep(e.retry_after + 1)
+        try:
+            await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+            return
+        except Exception:
+            log.exception('edit retry after flood control failed')
     except Exception:
         log.exception('failed to edit final report message, sending as a new message instead')
-        try:
-            await query.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
-        except Exception:
-            log.exception('fallback send also failed')
+    try:
+        await query.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    except Exception:
+        log.exception('fallback send also failed')
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,7 +266,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(user_id):
         await query.answer('Доступ закрыт', show_alert=True)
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        # Callback пришёл с опозданием (например, инстанс Render просыпался) —
+        # Telegram отвечает "query is too old". Отчёт всё равно можно показать.
+        log.warning('callback answer failed (stale query) — continuing anyway')
 
     data = query.data
     if data == 'menu':
@@ -281,40 +297,52 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith('report:'):
-        _, filial_key, period = data.split(':')
-        today = dt.date.today()
-        await _show_loading(query)
+        if context.user_data.get('report_busy'):
+            return  # двойной тап — предыдущий отчёт ещё собирается, не дублируем
+        context.user_data['report_busy'] = True
         try:
-            text = await asyncio.wait_for(asyncio.to_thread(_report_for, filial_key, period, today), REPORT_TIMEOUT)
-        except asyncio.TimeoutError:
-            log.error('report generation timed out')
-            text = None
-        except Exception:
-            log.exception('report generation failed')
-            text = None
+            _, filial_key, period = data.split(':')
+            today = dt.date.today()
+            await _show_loading(query)
+            try:
+                text = await asyncio.wait_for(asyncio.to_thread(_report_for, filial_key, period, today), REPORT_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.error('report generation timed out')
+                text = None
+            except Exception:
+                log.exception('report generation failed')
+                text = None
 
-        if text is None:
-            text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
-        await _finish_report(query, text, _report_footer(filial_key, period, today))
+            if text is None:
+                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+            await _finish_report(query, text, _report_footer(filial_key, period, today))
+        finally:
+            context.user_data.pop('report_busy', None)
         return
 
     if data.startswith('rrange:'):
-        _, filial_key, start_s, end_s = data.split(':')
-        start = dt.datetime.strptime(start_s, '%Y%m%d').date()
-        end = dt.datetime.strptime(end_s, '%Y%m%d').date()
-        await _show_loading(query)
+        if context.user_data.get('report_busy'):
+            return  # двойной тап — предыдущий отчёт ещё собирается, не дублируем
+        context.user_data['report_busy'] = True
         try:
-            text = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
-        except asyncio.TimeoutError:
-            log.error('range report generation timed out')
-            text = None
-        except Exception:
-            log.exception('range report failed')
-            text = None
-        if text is None:
-            text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
-        today = dt.date.today()
-        await _finish_report(query, text, _report_footer(filial_key, 'range', today, start, end))
+            _, filial_key, start_s, end_s = data.split(':')
+            start = dt.datetime.strptime(start_s, '%Y%m%d').date()
+            end = dt.datetime.strptime(end_s, '%Y%m%d').date()
+            await _show_loading(query)
+            try:
+                text = await asyncio.wait_for(asyncio.to_thread(_range_report_for, filial_key, start, end), REPORT_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.error('range report generation timed out')
+                text = None
+            except Exception:
+                log.exception('range report failed')
+                text = None
+            if text is None:
+                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+            today = dt.date.today()
+            await _finish_report(query, text, _report_footer(filial_key, 'range', today, start, end))
+        finally:
+            context.user_data.pop('report_busy', None)
         return
 
     if data.startswith('kassa:'):
