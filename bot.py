@@ -82,7 +82,8 @@ def _period_menu(filial_key):
         [InlineKeyboardButton('Вчера', callback_data=f'report:{filial_key}:yesterday'),
          InlineKeyboardButton('Позавчера', callback_data=f'report:{filial_key}:before_yesterday')],
         [InlineKeyboardButton('Эта неделя', callback_data=f'report:{filial_key}:week'),
-         InlineKeyboardButton('Этот месяц', callback_data=f'report:{filial_key}:month')],
+         InlineKeyboardButton('Прошлая неделя', callback_data=f'report:{filial_key}:last_week')],
+        [InlineKeyboardButton('Этот месяц', callback_data=f'report:{filial_key}:month')],
         [InlineKeyboardButton('✏️ Свой период', callback_data=f'range:{filial_key}')],
     ]
     return InlineKeyboardMarkup(buttons)
@@ -117,6 +118,8 @@ def _report_footer(filial_key, period, today, start=None, end=None):
         # (кнопку текущего периода не дублируем)
         if period != 'week':
             buttons.append([InlineKeyboardButton('📊 Статистика за неделю', callback_data='report:both:week')])
+        if period != 'last_week':
+            buttons.append([InlineKeyboardButton('📅 Статистика за прошлую неделю', callback_data='report:both:last_week')])
         if period != 'month':
             buttons.append([InlineKeyboardButton('📈 Статистика за месяц', callback_data='report:both:month')])
 
@@ -185,9 +188,9 @@ def _kassa_now_tail(data):
     return ['', f"💵 <b>В кассе сейчас: {_fmt_money(v)}</b>"]
 
 
-def _format_week(filial_title, data):
+def _format_week(filial_title, data, title_word='За неделю'):
     label = data.get('label') or ''
-    second = 'За неделю' + (f' ({label})' if label else '')
+    second = title_word + (f' ({label})' if label else '')
     header = _header(filial_title, second)
     lines = [header, ''] + _format_body(data, 'за неделю') + _kassa_now_tail(data)
     return '\n'.join(lines)
@@ -449,15 +452,17 @@ def _combined_report(period, today):
             return None
         merged['date'] = d
         return _format_day(COMBINED_TITLE, merged, include_kassa=False)
-    if period == 'week':
-        a = _safe(sheets.get_week_report, m_id, today) if m_id else None
-        b = _safe(sheets.get_week_report, b_id, today) if b_id else None
+    if period in ('week', 'last_week'):
+        d = today - dt.timedelta(days=7) if period == 'last_week' else today
+        a = _safe(sheets.get_week_report, m_id, d) if m_id else None
+        b = _safe(sheets.get_week_report, b_id, d) if b_id else None
         merged = _merge_reports(a, b)
         if merged is None:
             return None
         merged['label'] = (a or {}).get('label') or (b or {}).get('label') or ''
         merged['kassa_now'] = _sum_optional(_today_kassa_end(m_id, today), _today_kassa_end(b_id, today))
-        return _format_week(COMBINED_TITLE, merged)
+        title_word = 'За прошлую неделю' if period == 'last_week' else 'За неделю'
+        return _format_week(COMBINED_TITLE, merged, title_word)
     if period == 'month':
         a = _safe(sheets.get_month_report, m_id, today) if m_id else None
         b = _safe(sheets.get_month_report, b_id, today) if b_id else None
@@ -483,11 +488,13 @@ def _report_for(filial_key, period, today):
         report = sheets.get_day_report(filial['sheet_id'], d)
         return _format_day(filial['title'], report) if report else None
 
-    if period == 'week':
-        report = sheets.get_week_report(filial['sheet_id'], today)
+    if period in ('week', 'last_week'):
+        d = today - dt.timedelta(days=7) if period == 'last_week' else today
+        report = sheets.get_week_report(filial['sheet_id'], d)
         if report:
             report['kassa_now'] = _today_kassa_end(filial['sheet_id'], today)
-        return _format_week(filial['title'], report) if report else None
+        title_word = 'За прошлую неделю' if period == 'last_week' else 'За неделю'
+        return _format_week(filial['title'], report, title_word) if report else None
 
     if period == 'month':
         report = sheets.get_month_report(filial['sheet_id'], today)
