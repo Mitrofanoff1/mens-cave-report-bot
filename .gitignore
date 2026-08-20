@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.json
 .env
+
+# скрипты Google-таблиц: внутри лежит токен Telegram-бота, в репозиторий им нельзя
+apps-script/

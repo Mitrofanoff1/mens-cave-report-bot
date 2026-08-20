@@ -73,7 +73,12 @@ def _merge_reports(a, b):
         return None
     a = a or {}
     b = b or {}
-    return {k: (a.get(k, 0) or 0) + (b.get(k, 0) or 0) for k in SUM_KEYS}
+    merged = {k: (a.get(k, 0) or 0) + (b.get(k, 0) or 0) for k in SUM_KEYS}
+    # источники лежат вложенным словарём — складываем отдельно, по каждому каналу
+    sa, sb = a.get('sources') or {}, b.get('sources') or {}
+    merged['sources'] = {k: (sa.get(k, 0) or 0) + (sb.get(k, 0) or 0)
+                         for k in sheets.SOURCE_KEYS if k in sa or k in sb}
+    return merged
 
 
 def _period_menu(filial_key):
@@ -150,11 +155,44 @@ def _header(filial_title, second_line):
     return f"<b>Отчет Men's Cave: {filial_title}.</b>\n<b>{second_line}</b>"
 
 
+# Источники трафика: значок и подпись для отчёта. Порядок и ключи — из sheets.py,
+# там же порядок строк в таблице.
+SOURCE_VIEW = {
+    'src_yandex_maps': ('🔴', 'Яндекс.Карты'),
+    'src_2gis': ('🟢', '2ГИС'),
+    'src_street': ('🟠', 'С улицы'),
+    'src_referral': ('🟡', 'Рекомендация'),
+    'src_vk': ('🟣', 'VK группа'),
+    'src_tg': ('🔵', 'ТГ группа'),
+    'src_unknown': ('⭕', 'Неопределили'),
+}
+
+
+def _sources_lines(data):
+    """Разбивка новых клиентов по источникам. Показываем только те, где есть хоть один
+    человек — нули в отчёте только зашумляют. Если разбивки нет вовсе (старый лист
+    или все нули), возвращаем пусто, и строка «Новых» остаётся как была."""
+    sources = data.get('sources') or {}
+    lines = []
+    for key in sheets.SOURCE_KEYS:
+        count = sources.get(key, 0)
+        if not count:
+            continue
+        icon, title = SOURCE_VIEW[key]
+        lines.append(f'{icon} {title} - {count}')
+    return lines
+
+
 def _format_body(data, period_word):
+    sources = _sources_lines(data)
+    new_line = f"• Новых: {data['clients_new']}"
+    if sources:
+        new_line += '. Из них:'
     return [
         f"👥 <b>Клиентов всего {period_word}: {data['clients_total']}</b>",
         f"• Повторных: {data['clients_repeat']}",
-        f"• Новых: {data['clients_new']}",
+        new_line,
+        *sources,
         '',
         f"💸 <b>Выручка {period_word}: {_fmt_money(data['revenue_total'])}</b>",
         f"• Прошло по терминалу: {_fmt_money(data['revenue_terminal'])}",

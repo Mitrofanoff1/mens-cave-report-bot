@@ -1,19 +1,20 @@
 """
 Reads daily/weekly/monthly/custom-range report data out of a Mens Cave filial spreadsheet.
-Assumes the same template layout used across filials:
-  row4  = date per day-column
-  row5  = clients total, row6 = repeat, row7 = new
-  row9  = revenue total, row10 = terminal, row11 = cash, row12 = transfer
-  row13 = goods sold (count), row14 = goods revenue, row15 = goods revenue (cash)
-  row16 = 2GIS reviews, row17 = Yandex reviews
-  row21 = kassa start, row22 = kassa end, row23 = discrepancy
-  row25 = admin name
+
+СТРОКИ ИЩУТСЯ ПО ПОДПИСЯМ В СТОЛБЦЕ A, а не по жёстким номерам. Владелец
+периодически переставляет строки в шаблоне (в августе 2026 так добавились
+7 строк источников трафика, и всё ниже уехало на 3-10 строк). При жёстких
+номерах бот молча показывал бы чужие цифры; поиск по подписи переживает
+перестановку и позволяет одному коду читать и старые листы, и новые.
+Столбцы листа КАССА так же ищутся по заголовкам в строке 5.
+
+  row4  = date per day-column (это единственная опора на номер строки:
+          строка дат стоит над всеми блоками и не двигается)
   DAY_BLOCKS: B:H, J:P, R:X, Z:AF, AH:AN, AP:AV — 7 day-columns each, followed by
   a totals column (I, Q, Y, AG, AO, AW) with a week SUM already computed, and row1 of
-  each block holds a merged "dd.mm - dd.mm" label. AZ5..AZ20 holds the whole-month totals.
-KASSA sheet ("КАССА <Месяц> <Год>"): day rows starting at row6, columns H(date)..O(status).
+  each block holds a merged "dd.mm - dd.mm" label. AZ holds the whole-month totals.
 
-Весь месячный лист читается ОДНИМ запросом (A1:AZ25) — из этой сетки достаём
+Весь месячный лист читается ОДНИМ запросом — из этой сетки достаём
 день/неделю/месяц/период. Так отчёт укладывается в 1-2 запроса к API вместо
 десятков и не упирается в квоту Google (60 чтений в минуту).
 """
@@ -36,19 +37,62 @@ MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Ма
 
 DAY_BLOCK_BOUNDS = [(2, 8), (10, 16), (18, 24), (26, 32), (34, 40), (42, 48)]
 
-ROW_CLIENTS_TOTAL, ROW_CLIENTS_REPEAT, ROW_CLIENTS_NEW = 5, 6, 7
-ROW_REVENUE_TOTAL, ROW_TERMINAL, ROW_CASH, ROW_TRANSFER = 9, 10, 11, 12
-ROW_GOODS_COUNT, ROW_GOODS_TOTAL, ROW_GOODS_CASH = 13, 14, 15
-ROW_REVIEWS_2GIS, ROW_REVIEWS_YANDEX = 16, 17
-ROW_KASSA_START, ROW_KASSA_END, ROW_DISCREPANCY = 21, 22, 23
-ROW_ADMIN = 25
+DATES_ROW = 4            # строка с датами — единственная опора на номер строки
 
-SUMMARY_ROWS = [ROW_CLIENTS_TOTAL, ROW_CLIENTS_REPEAT, ROW_CLIENTS_NEW,
-                ROW_REVENUE_TOTAL, ROW_TERMINAL, ROW_CASH, ROW_TRANSFER,
-                ROW_GOODS_COUNT, ROW_GOODS_TOTAL, ROW_GOODS_CASH,
-                ROW_REVIEWS_2GIS, ROW_REVIEWS_YANDEX]
+# Подписи из столбца A. Первый вариант — как сейчас в шаблоне, остальные —
+# запасные написания (в таблице живёт опечатка «Налчиные», её тоже ловим).
+ROW_LABELS = {
+    'clients_total': ['количество клиентов за день'],
+    'clients_repeat': ['повторных клиентов'],
+    'clients_new': ['новых клиентов'],
+    'revenue_total': ['выручка с услуг за день'],
+    'revenue_terminal': ['оплата по терминалу'],
+    'revenue_cash': ['наличными'],
+    'revenue_transfer': ['переводом'],
+    'goods_count': ['количество проданных товаров'],
+    'goods_total': ['выручка с проданных товаров'],
+    'goods_cash': ['из них наличными'],
+    'reviews_2gis': ['получено отзывов на 2гис'],
+    'reviews_yandex': ['получено отзывов на яндекс.картах', 'получено отзывов на яндекс картах'],
+    'kassa_start': ['налчиные в кассе: на начало смены', 'наличные в кассе: на начало смены'],
+    'kassa_end': ['налчиные в кассе: на конец смены', 'наличные в кассе: на конец смены'],
+    'admin': ['администратор на смене'],
+}
 
-GRID_RANGE = 'A1:AZ25'   # весь месячный лист одним чтением
+# Источники трафика новых клиентов. НЕОБЯЗАТЕЛЬНЫЕ строки: появились в августе 2026,
+# в листах за прошлые месяцы их нет — если не нашлись, отчёт просто строится без них.
+# Порядок здесь = порядок строк в таблице и порядок вывода в отчёте.
+SOURCE_LABELS = [
+    ('src_yandex_maps', ['яндекс.карты', 'яндекс карты']),
+    ('src_2gis', ['2гис']),
+    ('src_street', ['с улицы']),
+    ('src_referral', ['рекомендация']),
+    ('src_vk', ['vk группа']),
+    ('src_tg', ['тг группа']),
+    ('src_unknown', ['неопределенно', 'другое / не указан']),
+]
+SOURCE_KEYS = [key for key, _ in SOURCE_LABELS]
+
+# Что показываем в сводке за день/неделю/месяц/период.
+SUMMARY_KEYS = ['clients_total', 'clients_repeat', 'clients_new',
+                'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
+                'goods_count', 'goods_total', 'goods_cash',
+                'reviews_2gis', 'reviews_yandex']
+
+# Заголовки листа КАССА (строка 5) — по ним ищем столбцы сводки.
+KASSA_HEADER_ROW = 5
+KASSA_COLS = {
+    'date': ['дата'],
+    'start': ['касса на начало смены'],
+    'revenue_cash': ['выручка наличными за день'],
+    'other_income': ['другие приходы (кроме выручки)'],
+    'expenses': ['расходы'],
+    'expected_end': ['ожидаемый конец в кассе'],
+    'actual_end': ['факт на конец смены'],
+    'status': ['статус'],
+}
+
+GRID_RANGE = 'A1:AZ40'   # весь месячный лист одним чтением, с запасом на новые строки
 MONTH_TOTAL_COL = 52     # столбец AZ — готовые итоги за месяц
 
 # httplib2.Http не потокобезопасен: два одновременных запроса через один объект
@@ -104,14 +148,40 @@ def _cell(grid, row, col):
     return r[col - 1] if len(r) >= col else ''
 
 
-def _col_vals(grid, col, rows):
-    return {r: _cell(grid, r, col) for r in rows}
+def _norm(text):
+    """Подпись к сравнимому виду: без регистра, ё=е, без маркеров списка и лишних пробелов."""
+    s = str(text or '').replace('\xa0', ' ').lower().replace('ё', 'е')
+    s = s.lstrip(' —–-•*').strip()
+    return ' '.join(s.split())
+
+
+def _row_map(grid):
+    """Где какая строка на этом листе: {ключ: номер строки}. Ищем по подписи в столбце A.
+    Строки источников необязательны — в старых листах их нет."""
+    wanted = list(ROW_LABELS.items()) + SOURCE_LABELS
+    found = {}
+    for i, row in enumerate(grid, 1):
+        label = _norm(row[0] if row else '')
+        if not label:
+            continue
+        for key, variants in wanted:
+            if key not in found and label in variants:
+                found[key] = i
+    missing = [k for k in ROW_LABELS if k not in found]
+    if missing:
+        raise ValueError('в листе не нашлись строки: ' + ', '.join(missing))
+    return found
+
+
+def _col_vals(grid, col, rows_by_key):
+    """Значения одного столбца по ключам: {ключ: значение ячейки}."""
+    return {key: _cell(grid, row, col) for key, row in rows_by_key.items()}
 
 
 def _grid_day_col(grid, date):
-    """1-based номер столбца, где в строке 4 стоит нужная дата, или None."""
+    """1-based номер столбца, где в строке дат стоит нужная дата, или None."""
     target = date.strftime('%d.%m.%Y')
-    dates_row = grid[3] if len(grid) > 3 else []
+    dates_row = grid[DATES_ROW - 1] if len(grid) >= DATES_ROW else []
     for i, v in enumerate(dates_row):
         if v == target:
             return i + 1
@@ -138,20 +208,9 @@ def _week_block_bounds(day_col):
 
 
 def _summary_dict(vals, extra=None):
-    d = {
-        'clients_total': _num(vals[ROW_CLIENTS_TOTAL]),
-        'clients_repeat': _num(vals[ROW_CLIENTS_REPEAT]),
-        'clients_new': _num(vals[ROW_CLIENTS_NEW]),
-        'revenue_total': _num(vals[ROW_REVENUE_TOTAL]),
-        'revenue_terminal': _num(vals[ROW_TERMINAL]),
-        'revenue_cash': _num(vals[ROW_CASH]),
-        'revenue_transfer': _num(vals[ROW_TRANSFER]),
-        'goods_count': _num(vals[ROW_GOODS_COUNT]),
-        'goods_total': _num(vals[ROW_GOODS_TOTAL]),
-        'goods_cash': _num(vals[ROW_GOODS_CASH]),
-        'reviews_2gis': _num(vals[ROW_REVIEWS_2GIS]),
-        'reviews_yandex': _num(vals[ROW_REVIEWS_YANDEX]),
-    }
+    d = {key: _num(vals.get(key)) for key in SUMMARY_KEYS}
+    # источников может не быть (старые листы) — тогда просто пустая разбивка
+    d['sources'] = {key: _num(vals[key]) for key in SOURCE_KEYS if key in vals}
     if extra:
         d.update(extra)
     return d
@@ -163,14 +222,13 @@ def get_day_report(spreadsheet_id, date):
     col = _grid_day_col(grid, date)
     if col is None:
         return None
-    rows_needed = SUMMARY_ROWS + [ROW_KASSA_START, ROW_KASSA_END, ROW_DISCREPANCY, ROW_ADMIN]
-    vals = _col_vals(grid, col, rows_needed)
+    rows = _row_map(grid)
+    vals = _col_vals(grid, col, rows)
     return _summary_dict(vals, {
         'date': date, 'sheet_name': sheet_name, 'period': 'day',
-        'kassa_start': _num(vals[ROW_KASSA_START]),
-        'kassa_end': _num(vals[ROW_KASSA_END]),
-        'discrepancy': _num(vals[ROW_DISCREPANCY]),
-        'admin': vals[ROW_ADMIN] or '—',
+        'kassa_start': _num(vals['kassa_start']),
+        'kassa_end': _num(vals['kassa_end']),
+        'admin': vals['admin'] or '—',
     })
 
 
@@ -184,7 +242,8 @@ def get_week_report(spreadsheet_id, date):
     if not bounds:
         return None
     start, _ = bounds
-    vals = _col_vals(grid, start + 7, SUMMARY_ROWS)  # 7 дневных столбцов, затем итог недели
+    summary_rows = {k: r for k, r in _row_map(grid).items() if k in SUMMARY_KEYS or k in SOURCE_KEYS}
+    vals = _col_vals(grid, start + 7, summary_rows)  # 7 дневных столбцов, затем итог недели
     label = _cell(grid, 1, start)  # объединённая шапка блока "dd.mm - dd.mm"
     return _summary_dict(vals, {'date': date, 'sheet_name': sheet_name, 'period': 'week', 'label': label})
 
@@ -192,23 +251,15 @@ def get_week_report(spreadsheet_id, date):
 def get_month_report(spreadsheet_id, date):
     sheet_name = _sheet_name_for(date)
     grid = _month_grid(spreadsheet_id, sheet_name)
-    vals = _col_vals(grid, MONTH_TOTAL_COL, SUMMARY_ROWS)
+    summary_rows = {k: r for k, r in _row_map(grid).items() if k in SUMMARY_KEYS or k in SOURCE_KEYS}
+    vals = _col_vals(grid, MONTH_TOTAL_COL, summary_rows)
     return _summary_dict(vals, {'date': date, 'sheet_name': sheet_name, 'period': 'month'})
 
 
 def get_range_report(spreadsheet_id, start_date, end_date):
     """Sums day-by-day across an arbitrary (possibly cross-month) range.
     Один запрос к API на каждый задетый месяц, а не на каждый день."""
-    totals = {k: 0 for k in [
-        'clients_total', 'clients_repeat', 'clients_new',
-        'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
-        'goods_count', 'goods_total', 'goods_cash', 'reviews_2gis', 'reviews_yandex']}
-    row_by_key = {
-        'clients_total': ROW_CLIENTS_TOTAL, 'clients_repeat': ROW_CLIENTS_REPEAT, 'clients_new': ROW_CLIENTS_NEW,
-        'revenue_total': ROW_REVENUE_TOTAL, 'revenue_terminal': ROW_TERMINAL,
-        'revenue_cash': ROW_CASH, 'revenue_transfer': ROW_TRANSFER,
-        'goods_count': ROW_GOODS_COUNT, 'goods_total': ROW_GOODS_TOTAL, 'goods_cash': ROW_GOODS_CASH,
-        'reviews_2gis': ROW_REVIEWS_2GIS, 'reviews_yandex': ROW_REVIEWS_YANDEX}
+    totals = {k: 0 for k in SUMMARY_KEYS + SOURCE_KEYS}
     wanted = {(start_date + dt.timedelta(days=i)).strftime('%d.%m.%Y')
               for i in range((end_date - start_date).days + 1)}
     found_any = False
@@ -216,9 +267,11 @@ def get_range_report(spreadsheet_id, start_date, end_date):
     while month <= end_date:
         try:
             grid = _month_grid(spreadsheet_id, _sheet_name_for(month))
+            # у каждого месяца своя разметка: старые листы и новые лежат по-разному
+            row_by_key = {k: r for k, r in _row_map(grid).items() if k in SUMMARY_KEYS or k in SOURCE_KEYS}
         except Exception:
-            grid = []  # листа за этот месяц нет — просто пропускаем
-        dates_row = grid[3] if len(grid) > 3 else []
+            grid, row_by_key = [], {}  # листа за этот месяц нет — просто пропускаем
+        dates_row = grid[DATES_ROW - 1] if len(grid) >= DATES_ROW else []
         for i, v in enumerate(dates_row):
             if v in wanted:
                 found_any = True
@@ -228,7 +281,9 @@ def get_range_report(spreadsheet_id, start_date, end_date):
         month = (month + dt.timedelta(days=32)).replace(day=1)
     if not found_any:
         return None
-    totals.update({'date': start_date, 'date_end': end_date, 'period': 'range'})
+    sources = {k: totals.pop(k) for k in SOURCE_KEYS}
+    totals.update({'sources': sources, 'date': start_date,
+                   'date_end': end_date, 'period': 'range'})
     return totals
 
 
@@ -240,19 +295,39 @@ def get_kassa_day_detail(spreadsheet_id, date):
     target = date.strftime('%d.%m.%Y')
 
     try:
-        rows = _fetch_grid(spreadsheet_id, kassa_sheet, 'H6:O36')
+        # с заголовками: столбцы сводки ищем по подписям, а не по буквам —
+        # в августе 2026 перед «Статусом» вклинился «Расхождение за день»
+        rows = _fetch_grid(spreadsheet_id, kassa_sheet, f'H{KASSA_HEADER_ROW}:R36')
     except Exception:
         return None
+    if not rows:
+        return None
+
+    header = [_norm(c) for c in rows[0]]
+    idx = {}
+    for key, variants in KASSA_COLS.items():
+        for i, h in enumerate(header):
+            if h in variants:
+                idx[key] = i
+                break
+    if 'date' not in idx:
+        return None
+
+    def pick(row, key, default=''):
+        i = idx.get(key)
+        return row[i] if i is not None and len(row) > i else default
 
     summary = None
-    for row in rows:
-        if row and row[0] == target:
-            v = row + [''] * (8 - len(row))
+    for row in rows[1:]:
+        if row and pick(row, 'date') == target:
             summary = {
-                'start': _num(v[1]), 'revenue_cash': _num(v[2]),
-                'other_income': _num(v[3]), 'expenses': _num(v[4]),
-                'expected_end': _num(v[5]), 'actual_end': _num(v[6]),
-                'status': v[7] or '',
+                'start': _num(pick(row, 'start')),
+                'revenue_cash': _num(pick(row, 'revenue_cash')),
+                'other_income': _num(pick(row, 'other_income')),
+                'expenses': _num(pick(row, 'expenses')),
+                'expected_end': _num(pick(row, 'expected_end')),
+                'actual_end': _num(pick(row, 'actual_end')),
+                'status': pick(row, 'status') or '',
             }
             break
     if summary is None:
