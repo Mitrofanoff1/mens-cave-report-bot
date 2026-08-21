@@ -40,9 +40,9 @@ def _is_allowed(user_id):
 
 
 # постоянная клавиатура внизу экрана — видна всегда, это и есть меню
-BTN_MURINO = f"Показать отчёт по {FILIALS['murino']['title']}"
-BTN_BUGRY = f"Показать отчёт по {FILIALS['bugry']['title']}"
-BTN_BOTH = 'Общий отчёт за 2 филиала'
+BTN_MURINO = f"Отчет по {FILIALS['murino']['title']}"
+BTN_BUGRY = f"Отчет по {FILIALS['bugry']['title']}"
+BTN_BOTH = 'Общий отчет за 2 филиала'
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[BTN_MURINO], [BTN_BUGRY], [BTN_BOTH]],
@@ -81,14 +81,21 @@ def _merge_reports(a, b):
     return merged
 
 
-def _period_menu(filial_key):
+def _day_button_label(date):
+    """«20.08 (чт)» — так сразу видно, какой именно день откроется."""
+    return f'{date.strftime("%d.%m")} ({WEEKDAYS_RU_LOWER[date.weekday()]})'
+
+
+def _period_menu(filial_key, today=None):
+    today = today or _today()
+    yesterday = today - dt.timedelta(days=1)
+    before = today - dt.timedelta(days=2)
     buttons = [
         [InlineKeyboardButton('📅 Сегодня', callback_data=f'report:{filial_key}:today')],
-        [InlineKeyboardButton('Вчера', callback_data=f'report:{filial_key}:yesterday'),
-         InlineKeyboardButton('Позавчера', callback_data=f'report:{filial_key}:before_yesterday')],
-        [InlineKeyboardButton('Эта неделя', callback_data=f'report:{filial_key}:week'),
-         InlineKeyboardButton('Прошлая неделя', callback_data=f'report:{filial_key}:last_week')],
-        [InlineKeyboardButton('Этот месяц', callback_data=f'report:{filial_key}:month')],
+        [InlineKeyboardButton(_day_button_label(yesterday), callback_data=f'report:{filial_key}:yesterday'),
+         InlineKeyboardButton(_day_button_label(before), callback_data=f'report:{filial_key}:before_yesterday')],
+        [InlineKeyboardButton('Прошлая неделя', callback_data=f'report:{filial_key}:last_week'),
+         InlineKeyboardButton('Этот месяц', callback_data=f'report:{filial_key}:month')],
         [InlineKeyboardButton('✏️ Свой период', callback_data=f'range:{filial_key}')],
     ]
     return InlineKeyboardMarkup(buttons)
@@ -101,7 +108,12 @@ def _other_filial(key):
 def _report_footer(filial_key, period, today, start=None, end=None):
     buttons = []
     if filial_key != 'both':
-        kassa_date = today - dt.timedelta(days=DAY_OFFSETS[period]) if period in DAY_OFFSETS else today
+        if period in DAY_OFFSETS:
+            kassa_date = today - dt.timedelta(days=DAY_OFFSETS[period])
+        elif period == 'range' and start and start == end:
+            kassa_date = start   # выбран один конкретный день — касса за него же
+        else:
+            kassa_date = today
         if period == 'range' and start and end:
             back = f'range:{start.strftime("%Y%m%d")}:{end.strftime("%Y%m%d")}'
         else:
@@ -356,8 +368,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cancel_menu = InlineKeyboardMarkup([[InlineKeyboardButton('« Отмена', callback_data=f'filial:{filial_key}')]])
         await _edit_quiet(
             query,
-            'Введите период одним сообщением в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ\n'
-            'Например: 01.08.2026-10.08.2026',
+            'Напишите одним сообщением:\n\n'
+            '• <b>один день</b> — 20.08.2026\n'
+            '   (можно короче: 20.08 — возьму текущий год)\n\n'
+            '• <b>период</b> — 01.08.2026-10.08.2026',
+            parse_mode='HTML',
             reply_markup=cancel_menu
         )
         return
@@ -380,7 +395,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = None
 
             if text is None:
-                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте еще раз через минуту.'
             await _finish_report(query, text, _report_footer(filial_key, period, today))
         finally:
             context.user_data.pop('report_busy', None)
@@ -404,7 +419,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log.exception('range report failed')
                 text = None
             if text is None:
-                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+                text = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте еще раз через минуту.'
             today = _today()
             await _finish_report(query, text, _report_footer(filial_key, 'range', today, start, end))
         finally:
@@ -437,14 +452,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log.exception('kassa detail failed')
                 text = None
             if text is None:
-                text = f"Не нашёл данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день ещё не заполнен, либо таблица долго не отвечает)."
+                text = f"Не нашел данные по кассе за {kassa_date.strftime('%d.%m.%Y')} (возможно, день еще не заполнен, либо таблица долго не отвечает)."
 
             if back_period == 'range' and len(parts) > 5:
                 back_cb = f'rrange:{filial_key}:{parts[4]}:{parts[5]}'
             else:
                 back_cb = f'report:{filial_key}:{back_period}'
             back = InlineKeyboardMarkup([
-                [InlineKeyboardButton('← Назад к отчёту', callback_data=back_cb)],
+                [InlineKeyboardButton('← Назад к отчету', callback_data=back_cb)],
                 [InlineKeyboardButton('« Другой период', callback_data=f'filial:{filial_key}')],
             ])
             await _finish_report(query, text, back)
@@ -544,6 +559,11 @@ def _report_for(filial_key, period, today):
 
 
 def _range_report_for(filial_key, start, end):
+    # Указали один день (в поле периода вписали одну дату) — показываем полноценный
+    # отчёт за день, с кассой и админом, а не «период из одного дня».
+    if start == end:
+        return _report_for(filial_key, 'today', start)
+
     today = _today()
     if filial_key == 'both':
         m_id, b_id = FILIALS['murino']['sheet_id'], FILIALS['bugry']['sheet_id']
@@ -565,6 +585,36 @@ def _range_report_for(filial_key, start, end):
     return _format_range(filial['title'], report) if report else None
 
 
+def _parse_one_date(text, today):
+    """«20.08.2026» или «20.08» (тогда берём текущий год). None, если не дата."""
+    text = text.strip()
+    for fmt in ('%d.%m.%Y', '%d.%m.%y'):
+        try:
+            return dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    try:
+        d = dt.datetime.strptime(text, '%d.%m').date()
+        return d.replace(year=today.year)
+    except ValueError:
+        return None
+
+
+def _parse_period(text, today):
+    """Вернёт (начало, конец) или None. Одна дата = день, две через дефис = период."""
+    text = (text or '').replace(' ', '').replace('—', '-').replace('–', '-')
+    parts = [p for p in text.split('-') if p]
+    if len(parts) == 1:
+        d = _parse_one_date(parts[0], today)
+        return (d, d) if d else None
+    if len(parts) != 2:
+        return None
+    start, end = _parse_one_date(parts[0], today), _parse_one_date(parts[1], today)
+    if not start or not end:
+        return None
+    return (end, start) if start > end else (start, end)
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not _is_allowed(user_id):
@@ -582,25 +632,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not filial_key:
         return  # не ждём ввода периода — игнорируем произвольные сообщения
 
-    text = update.message.text.strip()
-    parts = text.replace(' ', '').split('-')
-    if len(parts) != 2:
-        await update.message.reply_text('Не понял формат. Пример: 01.08.2026-10.08.2026')
+    parsed = _parse_period(update.message.text, _today())
+    if parsed is None:
+        await update.message.reply_text(
+            'Не понял. Можно двумя способами:\n'
+            '• один день — 20.08.2026 (или просто 20.08)\n'
+            '• период — 01.08.2026-10.08.2026'
+        )
         return
-    try:
-        start = dt.datetime.strptime(parts[0], '%d.%m.%Y').date()
-        end = dt.datetime.strptime(parts[1], '%d.%m.%Y').date()
-    except ValueError:
-        await update.message.reply_text('Не понял даты. Пример: 01.08.2026-10.08.2026')
-        return
-    if start > end:
-        start, end = end, start
+    start, end = parsed
     if (end - start).days > 92:
         await update.message.reply_text('Слишком большой период (максимум ~3 месяца). Введите период короче.')
         return
 
     if context.user_data.get('report_busy'):
-        await update.message.reply_text('⏳ Уже собираю предыдущий отчёт — подождите чуть-чуть…')
+        await update.message.reply_text('⏳ Уже собираю предыдущий отчет — подождите чуть-чуть…')
         return
     context.user_data.pop('awaiting_range_filial', None)
     context.user_data['report_busy'] = True
@@ -615,7 +661,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception('range report failed')
             text_out = None
         if text_out is None:
-            text_out = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте ещё раз через минуту.'
+            text_out = 'Не удалось получить данные (таблица долго не отвечает). Попробуйте еще раз через минуту.'
         try:
             await loading_msg.edit_text(
                 text_out, parse_mode='HTML', reply_markup=_report_footer(filial_key, 'range', _today(), start, end)
@@ -635,8 +681,8 @@ async def health(request):
 
 async def set_commands(app: Application):
     await app.bot.set_my_commands([
-        ('menu', 'Открыть меню отчётов'),
-        ('start', 'Открыть меню отчётов'),
+        ('menu', 'Открыть меню отчетов'),
+        ('start', 'Открыть меню отчетов'),
     ])
 
 
