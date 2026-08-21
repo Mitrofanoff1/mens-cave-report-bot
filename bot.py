@@ -64,7 +64,7 @@ def _today():
 
 COMBINED_TITLE = 'Мурино + Бугры'
 SUM_KEYS = ['clients_total', 'clients_repeat', 'clients_new',
-            'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
+            'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_qr',
             'goods_count', 'goods_total', 'goods_cash', 'reviews_2gis', 'reviews_yandex']
 
 
@@ -208,8 +208,8 @@ def _format_body(data, period_word):
         '',
         f"💸 <b>Выручка {period_word}: {_fmt_money(data['revenue_total'])}</b>",
         f"• Прошло по терминалу: {_fmt_money(data['revenue_terminal'])}",
+        f"• Оплата по QR-коду: {_fmt_money(data['revenue_qr'])}",
         f"• Залетело наличными: {_fmt_money(data['revenue_cash'])}",
-        f"• Переводом: {_fmt_money(data['revenue_transfer'])}",
         '',
         f"🔴 <b>Отзывы на Яндексе {period_word}: {data['reviews_yandex']}</b>",
         f"🟢 <b>Отзывы на 2ГИС {period_word}: {data['reviews_2gis']}</b>",

@@ -48,7 +48,9 @@ ROW_LABELS = {
     'revenue_total': ['выручка с услуг за день'],
     'revenue_terminal': ['оплата по терминалу'],
     'revenue_cash': ['наличными'],
-    'revenue_transfer': ['переводом'],
+    # «Переводом» переименовали в «Оплата по QR-коду» 21.08.2026 —
+    # старое написание оставляем, чтобы читались листы за прошлые месяцы
+    'revenue_qr': ['оплата по qr-коду', 'переводом'],
     'goods_count': ['количество проданных товаров'],
     'goods_total': ['выручка с проданных товаров'],
     'goods_cash': ['из них наличными'],
@@ -75,7 +77,7 @@ SOURCE_KEYS = [key for key, _ in SOURCE_LABELS]
 
 # Что показываем в сводке за день/неделю/месяц/период.
 SUMMARY_KEYS = ['clients_total', 'clients_repeat', 'clients_new',
-                'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_transfer',
+                'revenue_total', 'revenue_terminal', 'revenue_cash', 'revenue_qr',
                 'goods_count', 'goods_total', 'goods_cash',
                 'reviews_2gis', 'reviews_yandex']
 
